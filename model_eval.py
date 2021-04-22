@@ -115,7 +115,6 @@ class Net(nn.Module):
         return x
 
 
-
 def train(args, model, device, train_loader, optimizer, epoch):
     '''
     This is your training function. When you call this function, the model is
@@ -229,8 +228,8 @@ def main():
     train_dataset = datasets.MNIST('../data', train=True, download=True,
                 transform=transforms.Compose([       # Data preprocessing
                     transforms.ToTensor(),           # Add data augmentation here
-                    transforms.RandomPerspective(distortion_scale=0.2),
-                    transforms.RandomRotation(45),
+                    #transforms.RandomPerspective(distortion_scale=0.2),
+                    #transforms.RandomRotation(45),
                     transforms.Normalize((0.1307,), (0.3081,))
                 ]))
 
@@ -238,6 +237,7 @@ def main():
     # training by using SubsetRandomSampler. Right now the train and validation
     # sets are built from the same indices - this is bad! Change it so that
     # the training and validation sets are disjoint and have the correct relative sizes.
+
     idx_list_dic = {}
     for n in range(10):
         idx_list_dic[n] = []
@@ -245,68 +245,81 @@ def main():
         class_of_data = data[1]
         idx_list_dic[class_of_data].append(i)
 
-    subset_indices_train = []
-    subset_indices_valid = []
+    train_error_list = []
+    test_error_list = []
+    train_set_size_list = []
+    ratio_list = [1., .5, .25, .125, .0625]
+    for ratio in ratio_list:
+        subset_indices_train = []
+        subset_indices_valid = []
+        np.random.seed(1)
+        for n in range(10):
+            idx_list = idx_list_dic[n]
+            np.random.shuffle(idx_list)
+            cut = int(len(idx_list)*0.15)
+            subset_indices_valid += idx_list[:cut]
+            idx_list = idx_list[cut:]
+            cut = int(len(idx_list)*ratio) # This line is for 7.c
+            subset_indices_train += idx_list[:cut]
 
-    np.random.seed(1)
-    for n in range(10):
-        idx_list = idx_list_dic[n]
-        np.random.shuffle(idx_list)
-        cut = int(len(idx_list)*0.15)
-        subset_indices_valid += idx_list[:cut]
-        subset_indices_train += idx_list[cut:]
+        train_set_size_list.append(len(subset_indices_train))
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size,
+            sampler=SubsetRandomSampler(subset_indices_train)
+        )
+        val_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.test_batch_size,
+            sampler=SubsetRandomSampler(subset_indices_valid)
+        )
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
-        sampler=SubsetRandomSampler(subset_indices_train)
-    )
-    val_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.test_batch_size,
-        sampler=SubsetRandomSampler(subset_indices_valid)
-    )
+        # Load your model [fcNet, ConvNet, Net]
+        model = Net().to(device)
 
-    # Load your model [fcNet, ConvNet, Net]
-    model = Net().to(device)
+        # Try different optimzers here [Adam, SGD, RMSprop]
+        optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
-    # Try different optimzers here [Adam, SGD, RMSprop]
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
+        # Set your learning rate scheduler
+        scheduler = StepLR(optimizer, step_size=args.step, gamma=args.gamma)
 
-    # Set your learning rate scheduler
-    scheduler = StepLR(optimizer, step_size=args.step, gamma=args.gamma)
+        # Training loop
+        train_loss_list = []
+        val_loss_list = []
+        train_acc_list = []
+        val_acc_list = []
+        for epoch in range(1, args.epochs + 1):
+            train_loss, train_acc = train(args, model, device, train_loader, optimizer, epoch)
+            val_loss, val_acc = test(model, device, val_loader)
+            train_loss_list.append(train_loss)
+            val_loss_list.append(val_loss)
+            train_acc_list.append(train_acc)
+            val_acc_list.append(val_acc)
+            scheduler.step()    # learning rate scheduler
 
-    # Training loop
-    train_loss_list = []
-    val_loss_list = []
-    train_acc_list = []
-    val_acc_list = []
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train(args, model, device, train_loader, optimizer, epoch)
-        val_loss, val_acc = test(model, device, val_loader)
-        train_loss_list.append(train_loss)
-        val_loss_list.append(val_loss)
-        train_acc_list.append(train_acc)
-        val_acc_list.append(val_acc)
-        scheduler.step()    # learning rate scheduler
+        train_error_list.append(100.-train_acc_list[-1])
 
+        test_dataset = datasets.MNIST('../data', train=False,
+                    transform=transforms.Compose([
+                        transforms.ToTensor(),
+                        transforms.Normalize((0.1307,), (0.3081,))
+                    ]))
+
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset, batch_size=args.test_batch_size, shuffle=True, **kwargs)
+
+        test_loss, test_acc = test(model, device, test_loader)
+
+        test_error_list.append(100.-test_acc)
+
+    print(train_error_list)
+    print(test_error_list)
     fig, ax = plt.subplots()
-    ax.plot(list(range(1, args.epochs + 1)), train_loss_list, 'r-', label="train loss")
-    ax.plot(list(range(1, args.epochs + 1)), val_loss_list, 'r--', label="val loss")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("loss", color="red")
-    ax2 = ax.twinx()
-    ax2.plot(list(range(1, args.epochs + 1)), train_acc_list, 'b-', label="train acc")
-    ax2.plot(list(range(1, args.epochs + 1)), val_acc_list, 'b--', label="val acc")
-    ax2.set_ylabel("accuracy", color="blue")
+    ax.plot(np.log(train_set_size_list), np.log(train_error_list), 'r-', label="train")
+    ax.plot(np.log(train_set_size_list), np.log(test_error_list), 'b-', label="test")
+    ax.set_xlabel("log(training set size)")
+    ax.set_ylabel("log(error)", color="red")
     ax.legend()
-    ax2.legend()
     plt.show()
     fig.savefig("./fig1.jpg", format='jpeg', dpi=100, bbox_inches='tight')
-
-
-    # You may optionally save your model at each epoch here
-
-    if args.save_model:
-        torch.save(model.state_dict(), "mnist_model.pt")
 
 
 if __name__ == '__main__':

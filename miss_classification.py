@@ -114,35 +114,7 @@ class Net(nn.Module):
         x = F.log_softmax(x, dim=1)
         return x
 
-
-
-def train(args, model, device, train_loader, optimizer, epoch):
-    '''
-    This is your training function. When you call this function, the model is
-    trained for 1 epoch.
-    '''
-    model.train()   # Set the model to training mode
-    train_loss = 0
-    correct = 0
-    train_num = 0
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()               # Clear the gradient
-        output = model(data)                # Make predictions
-        loss = F.nll_loss(output, target)   # Compute loss
-        train_loss += loss.sum().item()
-        pred = output.argmax(dim=1, keepdim=True)
-        correct += pred.eq(target.view_as(pred)).sum().item()
-        train_num += len(data)
-        loss.backward()                     # Gradient computation
-        optimizer.step()                    # Perform a single optimization step
-        if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.sampler),
-                100. * batch_idx / len(train_loader), loss.item()))
-    return train_loss / train_num, 100. * correct / train_num
-
-def test(model, device, test_loader):
+def miss_classification(model, device, test_loader):
     model.eval()    # Set the model to inference mode
     test_loss = 0
     correct = 0
@@ -153,8 +125,23 @@ def test(model, device, test_loader):
             output = model(data)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
+            miss = 1-(pred.eq(target.view_as(pred)).numpy())
+            miss_idx = np.where(miss == 1)[0]
+            data = data.numpy()
+            target = target.numpy()
+            pred = pred.numpy()
+
+            fig, axs = plt.subplots(3, 3)
+            for i, idx in enumerate(miss_idx[:9]):
+                img = data[idx].reshape((28,28))
+                t = target[idx]
+                p = pred[idx][0]
+                axs[int(i/3), int(i%3)].imshow(img, cmap='gray')
+                axs[int(i/3), int(i%3)].title.set_text('Label: {label}, Pred: {pred}'.format(label=t, pred=p))
+                axs[int(i/3), int(i%3)].set_axis_off()
+            plt.savefig("./miss.png", bbox_inches='tight')
             test_num += len(data)
+            break
 
     test_loss /= test_num
 
@@ -205,108 +192,24 @@ def main():
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
     # Evaluate on the official test set
-    if args.evaluate:
-        assert os.path.exists(args.load_model)
+    assert os.path.exists(args.load_model)
 
-        # Set the test model
-        model = Net().to(device)
-        model.load_state_dict(torch.load(args.load_model))
+    # Set the test model
+    model = Net().to(device)
+    model.load_state_dict(torch.load(args.load_model))
 
-        test_dataset = datasets.MNIST('../data', train=False,
-                    transform=transforms.Compose([
-                        transforms.ToTensor(),
-                        transforms.Normalize((0.1307,), (0.3081,))
-                    ]))
-
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=args.test_batch_size, shuffle=True, **kwargs)
-
-        test(model, device, test_loader)
-
-        return
-
-    # Pytorch has default MNIST dataloader which loads data at each iteration
-    train_dataset = datasets.MNIST('../data', train=True, download=True,
-                transform=transforms.Compose([       # Data preprocessing
-                    transforms.ToTensor(),           # Add data augmentation here
-                    transforms.RandomPerspective(distortion_scale=0.2),
-                    transforms.RandomRotation(45),
+    test_dataset = datasets.MNIST('../data', train=False,
+                transform=transforms.Compose([
+                    transforms.ToTensor(),
                     transforms.Normalize((0.1307,), (0.3081,))
                 ]))
 
-    # You can assign indices for training/validation or use a random subset for
-    # training by using SubsetRandomSampler. Right now the train and validation
-    # sets are built from the same indices - this is bad! Change it so that
-    # the training and validation sets are disjoint and have the correct relative sizes.
-    idx_list_dic = {}
-    for n in range(10):
-        idx_list_dic[n] = []
-    for i, data in enumerate(train_dataset):
-        class_of_data = data[1]
-        idx_list_dic[class_of_data].append(i)
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
-    subset_indices_train = []
-    subset_indices_valid = []
+    miss_classification(model, device, test_loader)
 
-    np.random.seed(1)
-    for n in range(10):
-        idx_list = idx_list_dic[n]
-        np.random.shuffle(idx_list)
-        cut = int(len(idx_list)*0.15)
-        subset_indices_valid += idx_list[:cut]
-        subset_indices_train += idx_list[cut:]
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
-        sampler=SubsetRandomSampler(subset_indices_train)
-    )
-    val_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.test_batch_size,
-        sampler=SubsetRandomSampler(subset_indices_valid)
-    )
-
-    # Load your model [fcNet, ConvNet, Net]
-    model = Net().to(device)
-
-    # Try different optimzers here [Adam, SGD, RMSprop]
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
-
-    # Set your learning rate scheduler
-    scheduler = StepLR(optimizer, step_size=args.step, gamma=args.gamma)
-
-    # Training loop
-    train_loss_list = []
-    val_loss_list = []
-    train_acc_list = []
-    val_acc_list = []
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train(args, model, device, train_loader, optimizer, epoch)
-        val_loss, val_acc = test(model, device, val_loader)
-        train_loss_list.append(train_loss)
-        val_loss_list.append(val_loss)
-        train_acc_list.append(train_acc)
-        val_acc_list.append(val_acc)
-        scheduler.step()    # learning rate scheduler
-
-    fig, ax = plt.subplots()
-    ax.plot(list(range(1, args.epochs + 1)), train_loss_list, 'r-', label="train loss")
-    ax.plot(list(range(1, args.epochs + 1)), val_loss_list, 'r--', label="val loss")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("loss", color="red")
-    ax2 = ax.twinx()
-    ax2.plot(list(range(1, args.epochs + 1)), train_acc_list, 'b-', label="train acc")
-    ax2.plot(list(range(1, args.epochs + 1)), val_acc_list, 'b--', label="val acc")
-    ax2.set_ylabel("accuracy", color="blue")
-    ax.legend()
-    ax2.legend()
-    plt.show()
-    fig.savefig("./fig1.jpg", format='jpeg', dpi=100, bbox_inches='tight')
-
-
-    # You may optionally save your model at each epoch here
-
-    if args.save_model:
-        torch.save(model.state_dict(), "mnist_model.pt")
+    return
 
 
 if __name__ == '__main__':
